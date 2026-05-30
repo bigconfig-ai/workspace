@@ -1,0 +1,7 @@
+.*
+!.gitignore
+/big-config/
+/launcher/
+/once/
+/selmer/
+/walter/
