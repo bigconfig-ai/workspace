@@ -1,0 +1,271 @@
+#!/usr/bin/env bb
+
+(ns git-workspace-run
+  (:require [babashka.process :as process]
+            [clojure.java.io :as io]
+            [clojure.java.shell :as shell]
+            [clojure.string :as str]))
+
+(def default-root "/home/ubuntu/code/bigconfig")
+(def subcommands #{"report" "commit"})
+(def separator "──────────────────────────────────────────")
+(def pi-command ["pi" "--print" "--model" "deepseek-v4-flash" "commit and push"])
+
+(def help-text
+  "run — Report dirty git repos under the bigconfig workspace,
+      and optionally commit & push in each dirty repo via pi.
+
+Usage:
+  bb run [subcommand] [options] [root-dir]
+  ./run  [subcommand] [options] [root-dir]
+
+Subcommands:
+  report    (default) Show dirty/clean status for all git repos.
+  commit    Launch \"pi --print --model deepseek-v4-flash\" with prompt \"commit and push\"
+            in each dirty repo.
+
+Options:
+  --porcelain      Machine-parseable tab-separated output (report only).
+  --dry-run        Show what would be done without actually running pi (commit only).
+  --help, -h       Show this help.
+
+Examples:
+  bb run                                 # report on defaults
+  bb run --porcelain                     # machine-readable report
+  bb run commit                          # commit & push every dirty repo
+  bb run commit --dry-run                # preview without running
+  bb run /some/other/path                # scan a different root")
+
+(defn parse-args
+  "Parse args in the same shape as the old Bash script:
+   flags may appear anywhere; positionals are interpreted as
+   [subcommand] [root-dir] or [root-dir]. Extra positionals are ignored."
+  [args]
+  (loop [remaining (seq args)
+         opts {:root default-root
+               :subcommand "report"
+               :porcelain? false
+               :dry-run? false
+               :positionals []}]
+    (if-not remaining
+      (let [[first-pos second-pos] (:positionals opts)
+            opts (dissoc opts :positionals)
+            opts (cond
+                   (nil? first-pos) opts
+                   (subcommands first-pos) (assoc opts :subcommand first-pos)
+                   :else (assoc opts :root first-pos))
+            opts (if second-pos (assoc opts :root second-pos) opts)]
+        (if (subcommands (:subcommand opts))
+          opts
+          (assoc opts :error (str "Unknown subcommand: " (:subcommand opts)))))
+      (let [arg (first remaining)]
+        (cond
+          (= arg "--porcelain")
+          (recur (next remaining) (assoc opts :porcelain? true))
+
+          (= arg "--dry-run")
+          (recur (next remaining) (assoc opts :dry-run? true))
+
+          (#{"--help" "-h"} arg)
+          (assoc opts :help? true)
+
+          (str/starts-with? arg "-")
+          (assoc opts :error (str "Unknown option: " arg))
+
+          :else
+          (recur (next remaining) (update opts :positionals conj arg)))))))
+
+(defn output-lines [s]
+  (if (empty? s)
+    []
+    (str/split-lines s)))
+
+(defn parent-path [path]
+  (some-> path io/file .getParentFile .getPath))
+
+(defn discover-repos [root]
+  (let [{:keys [out]} (shell/sh "find" root "-name" ".git" "(" "-type" "d" "-o" "-type" "f" ")" "-print0")]
+    (->> (str/split out #"\u0000")
+         (remove empty?)
+         (map parent-path)
+         (remove nil?)
+         sort
+         vec)))
+
+(defn sh-in [dir & args]
+  (apply shell/sh (concat args [:dir dir])))
+
+(defn git-lines [repo & args]
+  (let [{:keys [out]} (apply sh-in repo "git" args)]
+    (output-lines out)))
+
+(defn git-branch [repo]
+  (let [{:keys [exit out]} (sh-in repo "git" "rev-parse" "--abbrev-ref" "HEAD")]
+    (if (zero? exit)
+      (str/trim-newline out)
+      "UNKNOWN")))
+
+(defn rel-path [root repo]
+  (let [prefix (str root "/")]
+    (if (str/starts-with? repo prefix)
+      (subs repo (count prefix))
+      repo)))
+
+(defn repo-metadata [root repo]
+  (let [branch (git-branch repo)
+        tracked-count (count (git-lines repo "ls-files"))
+        status-lines (if (zero? tracked-count)
+                       []
+                       (git-lines repo "status" "--porcelain"))
+        dirty-count (count status-lines)
+        state (cond
+                (zero? tracked-count) :no-tracked-files
+                (pos? dirty-count) :dirty
+                :else :clean)]
+    {:repo repo
+     :rel (rel-path root repo)
+     :branch branch
+     :tracked-count tracked-count
+     :status-lines status-lines
+     :dirty-count dirty-count
+     :state state}))
+
+(defn status-label [xy]
+  (case xy
+    "M " "modified (staged)"
+    " M" "modified (unstaged)"
+    "A " "added (staged)"
+    "??" "untracked"
+    "D " "deleted (staged)"
+    " D" "deleted (unstaged)"
+    "R " "renamed (staged)"
+    "C " "copied (staged)"
+    "MM" "modified (staged+unstaged)"
+    (str "changed (" xy ")")))
+
+(defn classify-porcelain-line [line]
+  (let [xy (if (>= (count line) 2) (subs line 0 2) line)
+        path (if (>= (count line) 3) (subs line 3) "")]
+    {:xy xy
+     :label (status-label xy)
+     :path path}))
+
+(defn repo-counts [metas]
+  {:total (count metas)
+   :dirty (count (filter #(= :dirty (:state %)) metas))
+   :clean (count (filter #(= :clean (:state %)) metas))})
+
+(defn human-row [meta]
+  (case (:state meta)
+    :no-tracked-files
+    (format "  ⚠  %s  (%s)  —  no tracked files" (:rel meta) (:branch meta))
+
+    :dirty
+    (format "  ✗  %s  (%s)  —  %d dirty file(s)" (:rel meta) (:branch meta) (:dirty-count meta))
+
+    :clean
+    (format "  ✓  %s  (%s)  —  clean" (:rel meta) (:branch meta))))
+
+(defn porcelain-row [meta]
+  (case (:state meta)
+    :no-tracked-files
+    (str/join "\t" ["NO-TRACKED-FILES" (:rel meta) (:branch meta)])
+
+    :dirty
+    (str/join "\t" ["DIRTY" (:rel meta) (:branch meta) (:dirty-count meta)])
+
+    :clean
+    (str/join "\t" ["CLEAN" (:rel meta) (:branch meta)])))
+
+(defn print-report! [{:keys [root porcelain?]} metas]
+  (let [{:keys [total dirty clean]} (repo-counts metas)]
+    (doseq [meta metas]
+      (if porcelain?
+        (println (porcelain-row meta))
+        (do
+          (println (human-row meta))
+          (when (= :dirty (:state meta))
+            (doseq [line (:status-lines meta)
+                    :let [{:keys [label path]} (classify-porcelain-line line)]]
+              (printf "       • %s  %s%n" label path))))))
+    (if porcelain?
+      (println (str/join "\t" ["SUMMARY" (str total " repos") (str dirty " dirty") (str clean " clean")]))
+      (do
+        (println)
+        (println separator)
+        (println (format "  Git Dirty Report — %s" root))
+        (println (format "  Total repos:  %d" total))
+        (println (format "  Dirty:        %d" dirty))
+        (println (format "  Clean:        %d" clean))
+        (when (pos? dirty)
+          (println)
+          (println "  Dirty repos:")
+          (doseq [meta (filter #(= :dirty (:state %)) metas)]
+            (printf "    • %s%n" (:rel meta))))
+        (println separator)))))
+
+(defn run-pi! [repo]
+  (let [{:keys [exit]} (apply process/shell
+                              {:dir repo
+                               :in :inherit
+                               :out :inherit
+                               :err :inherit
+                               :continue true}
+                              pi-command)]
+    exit))
+
+(defn print-command-preview! []
+  (println "  (dry-run) would run: pi --print --model deepseek-v4-flash 'commit and push'"))
+
+(defn commit! [{:keys [dry-run?]} metas]
+  (let [dirty-metas (vec (filter #(= :dirty (:state %)) metas))
+        dirty-count (count dirty-metas)]
+    (if (zero? dirty-count)
+      (println "No dirty repos to commit. All clean.")
+      (do
+        (println (format "Running 'pi --print --model deepseek-v4-flash \"commit and push\"' in %d dirty repo(s)..." dirty-count))
+        (println)
+        (doseq [[i meta] (map-indexed vector dirty-metas)]
+          (println separator)
+          (println (format "  [%d/%d]  %s  (%s)  —  %d dirty file(s)"
+                           i (dec dirty-count) (:rel meta) (:branch meta) (:dirty-count meta)))
+          (println)
+          (if dry-run?
+            (print-command-preview!)
+            (let [exit (try
+                         (run-pi! (:repo meta))
+                         (catch Exception e
+                           (binding [*out* *err*]
+                             (println (str "Failed to run pi: " (.getMessage e))))
+                           1))]
+              (when-not (zero? exit)
+                (System/exit exit))
+              (println)
+              (println (format "  Done — exit code: %d" exit)))))
+        (println separator)
+        (println (format "  Finished. Processed %d dirty repo(s)." dirty-count))))))
+
+(defn -main [& args]
+  (let [{:keys [root subcommand help? error] :as opts} (parse-args args)]
+    (cond
+      help?
+      (println help-text)
+
+      error
+      (do
+        (binding [*out* *err*]
+          (println error))
+        (System/exit 1))
+
+      :else
+      (let [repos (discover-repos root)]
+        (if (empty? repos)
+          (do
+            (println (format "No git repositories found under %s" root))
+            (System/exit 1))
+          (let [metas (mapv #(repo-metadata root %) repos)]
+            (case subcommand
+              "commit" (commit! opts metas)
+              "report" (print-report! opts metas))))))))
+
+(apply -main *command-line-args*)
