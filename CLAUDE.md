@@ -4,31 +4,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository shape
 
-This is a multi-language polyrepo holding three nested libraries (each implemented three times in Clojure, Python, TypeScript) plus a two-language `bc-pkg` launcher:
+This is a multi-language polyrepo holding four nested libraries/packages (each implemented three times in Clojure, Python, TypeScript) plus a two-language `bc-pkg` launcher:
 
 ```
 bigconfig/
 ├── selmer/{clojure,python,typescript}      # Django-style template engine
 ├── big-config/{clojure,python,typescript}  # Workflow + render engine (uses selmer)
 ├── once/{clojure,python,typescript}        # Infra automation CLI (uses big-config)
+├── walter/{clojure,python,typescript}      # Dev-workstation provisioner (uses once + big-config)
 └── launcher/{python,typescript}            # `bc-pkg` bootstrap launcher (PyPI / npm)
 ```
 
-Each of the eleven leaves is an independent project with its own build system, tests, and `CLAUDE.md` / `README.md`. **Always read the leaf's `CLAUDE.md` before editing inside it** — the per-language conventions, what-to-avoid lists, and entry-point naming differ.
+Each of the fourteen leaves is an independent project with its own build system, tests, and `CLAUDE.md` / `README.md`. **Always read the leaf's `CLAUDE.md` before editing inside it** — the per-language conventions, what-to-avoid lists, and entry-point naming differ.
 
 The root directory itself is not a git repo and has no build system; it's a workspace that holds the projects side-by-side so they can reference each other by relative path during development.
 
 ## Dependency direction
 
 ```
-once  ──depends-on──▶  big-config  ──depends-on──▶  selmer
+once / walter  ──depends-on──▶  big-config  ──depends-on──▶  selmer
+walter         ──also-depends-on──▶  once
 ```
 
 Within a single language, projects consume each other either as published packages or as local-path overrides:
 
-- **Clojure**: `once/clojure/deps.edn` pins `io.github.amiorin/big-config` and has a commented `:local/root "../../big-config/clojure"` line — swap to develop against local source. `big-config/clojure` uses Selmer from Maven (`selmer/selmer 1.13.1`).
-- **Python**: `once/python/pyproject.toml` pins `big-config` to a Git commit; `big-config/python/pyproject.toml` pins `selmer` to a Git commit. Use `uv sync` to resolve.
-- **TypeScript**: `once/typescript/package.json` pins `big-config` to a GitHub commit; `big-config/typescript/package.json` pins `selmer` to a GitHub commit. There is also reference in some docs to a local path `../../big-config/typescript` — verify which mode is active before assuming.
+- **Clojure**: `once/clojure/deps.edn` pins big-config by `:git/sha` (under the coordinate `io.github.amiorin/big-config`) and has a commented `:local/root "../../big-config/clojure"` line — swap to develop against local source. `walter/clojure/deps.edn` pins big-config (with an explicit `:git/url` to `bigconfig-ai/big-config`) and `io.github.bigconfig-ai/once`. `big-config/clojure` uses Selmer from Maven (`selmer/selmer 1.13.1`).
+- **Python**: `once/python/pyproject.toml` pins `big-config` to a Git commit; `walter/python/pyproject.toml` pins `big-config` and `once` to Git commits; `big-config/python/pyproject.toml` pins `selmer` to a Git commit. Use `uv sync` to resolve.
+- **TypeScript**: `once/typescript/package.json` pins `big-config` to a GitHub commit; `walter/typescript/package.json` pins `big-config` and `once` to GitHub commits; `big-config/typescript/package.json` pins `selmer` to a GitHub commit. To develop against local source, override a dependency with a `file:` path (e.g. `"big-config": "file:../../big-config/typescript"`) and re-run `npm install`.
 
 Cross-language work that touches the engine surface (e.g., adding a step type, a renderer feature, or a workflow primitive) needs the change applied in all three implementations of that library, then re-verified in the consumers downstream.
 
@@ -82,6 +84,7 @@ These are the load-bearing ideas; the per-language `CLAUDE.md` files have the de
 - Infers the target language (Clojure / Python / TypeScript) from the pinned GitHub content, copies the package's root `run` file into the cwd, and writes a language-native manifest (`deps.edn` + `bb.edn` / `pyproject.toml` / `package.json`).
 - Forwards the rest of the command to that pinned target package.
 - Refuses to update implicitly if the directory is already initialised for a different repo/ref/SHA.
+- Also accepts a **local path** (`./`, `../`, `/`, `~`, or `.`/`..`) instead of `<owner/repo@ref>` for live local development: it writes native local-path deps (`:local/root` / `file:` / editable `[tool.uv.sources]`), symlinks the `run` file, and does no SHA pinning. Switching an initialised directory between local and GitHub (or to a different repo/ref/SHA or local path) is a hard error.
 
 Both launchers must produce equivalent on-disk artifacts for the same `<owner/repo@ref>` — keep behaviour parity. They have **no runtime dependencies** outside of the stdlib (Python) / Node built-ins (TypeScript). The Python launcher targets Python ≥ 3.11; the TypeScript launcher targets Node ≥ 18.
 
@@ -92,6 +95,18 @@ Both launchers must produce equivalent on-disk artifacts for the same `<owner/re
 - **Pure report builders are separate**: `validate-report` / `describe-report` (Clojure), `validateReport` / `describeReport` (TS), and the Python equivalents are pure and accept injected dependencies — keep that separation so tests can stay process-free.
 - **Credentials**: never in source. Live in `.envrc.private` (gitignored) per leaf.
 - **`prevent_destroy = true`** is the default on compute resources. Override with `BC_PAR_COMPUTE_PREVENT_DESTROY=false` before `once package delete`.
+
+## Walter package concepts
+
+`walter/{clojure,python,typescript}` is a second BigConfig package (`bigconfig-ai/walter`) that provisions a cloud VM (or targets an existing `no-infra` host) and configures it as a development workstation. It reuses Once's shared `tofu` and `ansible-local` stages (depending on the `once` package) and owns its Walter-specific `ansible` stage, roles, and data. Its package workflow is `tofu → ansible → ansible-local`; `delete` destroys the compute Tofu stage. `package build` output is verified byte-for-byte against the Clojure reference artifact under `walter/clojure/.dist/walter-<hash>/`.
+
+## Workspace tooling (root `run`)
+
+The root `run` is a Babashka script (namespace `run`) exposing grouped command helpers for the workspace itself (not a BigConfig package):
+
+- `bb run` — top-level help.
+- `bb run git report [--porcelain] [--root-dir DIR]` — report dirty/clean/no-tracked-files status for every nested git repo.
+- `bb run git commit [--dry-run] [--root-dir DIR]` — run `pi --print --model deepseek-v4-flash "commit and push"` in each dirty repo.
 
 ## Caddyfile
 

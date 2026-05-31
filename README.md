@@ -53,6 +53,19 @@ cd walter/typescript && npm run walter -- package build
 cd launcher/python && uv run bc-pkg bigconfig-ai/once@clojure package validate
 ```
 
+## Workspace tooling
+
+The root `run` is a Babashka script (run it as `bb run ...`) that operates on the workspace itself rather than on any single leaf. It groups its commands under `git`:
+
+```sh
+bb run                      # top-level help
+bb run git report           # dirty/clean status for every nested git repo
+bb run git report --porcelain
+bb run git commit --dry-run # preview committing & pushing each dirty repo
+```
+
+`bb run git commit` runs `pi --print --model deepseek-v4-flash "commit and push"` in each dirty repo; `--root-dir DIR` scans somewhere other than the current directory.
+
 ## BigConfig package model
 
 BigConfig packages render templates and orchestrate tools through named workflow steps. The main runtime concepts are:
@@ -104,6 +117,13 @@ npx bc-pkg bigconfig-ai/walter@typescript package build
 ```
 
 On first run it resolves the ref to a commit SHA, writes a language-native manifest, copies the package `run` file, and forwards subsequent commands to the pinned target.
+
+It also accepts a **local path** instead of a GitHub spec for live local development — it wires native local-path dependencies, symlinks the `run` file, and does no SHA pinning:
+
+```sh
+uvx bc-pkg ../once/python package build
+npx bc-pkg ../once/typescript package build
+```
 
 ## Configuration and credentials
 
