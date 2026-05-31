@@ -1,79 +1,148 @@
 #!/usr/bin/env bb
 
-(ns git-workspace-run
+(ns run
   (:require [babashka.process :as process]
             [clojure.java.io :as io]
             [clojure.java.shell :as shell]
             [clojure.string :as str]))
 
 (def default-root "/home/ubuntu/code/bigconfig")
-(def subcommands #{"report" "commit"})
+(def git-subcommands #{"report" "commit"})
+(def help-options #{"--help" "-h"})
 (def separator "──────────────────────────────────────────")
 (def pi-command ["pi" "--print" "--model" "deepseek-v4-flash" "commit and push"])
 
-(def help-text
-  "run — Report dirty git repos under the bigconfig workspace,
-      and optionally commit & push in each dirty repo via pi.
+(def top-help-text
+  "run — Workspace helper command groups.
 
 Usage:
-  bb run [subcommand] [options] [root-dir]
-  ./run  [subcommand] [options] [root-dir]
+  bb run
+  bb run <command-group> [args]
 
-Subcommands:
-  report    (default) Show dirty/clean status for all git repos.
+Command groups:
+  git    Git workspace report / commit helpers.
+
+Options:
+  --help, -h    Show this help.
+
+Examples:
+  bb run git
+  bb run git report
+  bb run git commit --dry-run")
+
+(def git-help-text
+  "run git — Report dirty git repos under the bigconfig workspace,
+          and optionally commit & push in each dirty repo via pi.
+
+Usage:
+  bb run git
+  bb run git report [options]
+  bb run git commit [options]
+
+Commands:
+  report    Show dirty/clean status for all git repos.
   commit    Launch \"pi --print --model deepseek-v4-flash\" with prompt \"commit and push\"
             in each dirty repo.
 
-Options:
-  --porcelain      Machine-parseable tab-separated output (report only).
-  --dry-run        Show what would be done without actually running pi (commit only).
+Common options:
+  --root-dir DIR   Scan DIR instead of /home/ubuntu/code/bigconfig.
   --help, -h       Show this help.
 
+Report options:
+  --porcelain      Machine-parseable tab-separated output.
+
+Commit options:
+  --dry-run        Show what would be done without actually running pi.
+
 Examples:
-  bb run                                 # report on defaults
-  bb run --porcelain                     # machine-readable report
-  bb run commit                          # commit & push every dirty repo
-  bb run commit --dry-run                # preview without running
-  bb run /some/other/path                # scan a different root")
+  bb run git report
+  bb run git report --porcelain
+  bb run git report --root-dir /some/other/path
+  bb run git commit --dry-run")
 
-(defn parse-args
-  "Parse args in the same shape as the old Bash script:
-   flags may appear anywhere; positionals are interpreted as
-   [subcommand] [root-dir] or [root-dir]. Extra positionals are ignored."
-  [args]
-  (loop [remaining (seq args)
-         opts {:root default-root
-               :subcommand "report"
-               :porcelain? false
-               :dry-run? false
-               :positionals []}]
-    (if-not remaining
-      (let [[first-pos second-pos] (:positionals opts)
-            opts (dissoc opts :positionals)
-            opts (cond
-                   (nil? first-pos) opts
-                   (subcommands first-pos) (assoc opts :subcommand first-pos)
-                   :else (assoc opts :root first-pos))
-            opts (if second-pos (assoc opts :root second-pos) opts)]
-        (if (subcommands (:subcommand opts))
-          opts
-          (assoc opts :error (str "Unknown subcommand: " (:subcommand opts)))))
-      (let [arg (first remaining)]
-        (cond
-          (= arg "--porcelain")
-          (recur (next remaining) (assoc opts :porcelain? true))
+(defn error-result [scope message]
+  {:action :error
+   :scope scope
+   :error message})
 
-          (= arg "--dry-run")
-          (recur (next remaining) (assoc opts :dry-run? true))
+(defn parse-git-args [args]
+  (cond
+    (empty? args)
+    {:action :git-help}
 
-          (#{"--help" "-h"} arg)
-          (assoc opts :help? true)
+    (some help-options args)
+    {:action :git-help}
 
-          (str/starts-with? arg "-")
-          (assoc opts :error (str "Unknown option: " arg))
+    :else
+    (loop [remaining (seq args)
+           opts {:root default-root
+                 :porcelain? false
+                 :dry-run? false
+                 :positionals []}]
+      (if-not remaining
+        (let [[subcommand & extra] (:positionals opts)
+              opts (dissoc opts :positionals)]
+          (cond
+            (nil? subcommand)
+            (error-result :git "Missing git subcommand.")
 
-          :else
-          (recur (next remaining) (update opts :positionals conj arg)))))))
+            (not (git-subcommands subcommand))
+            (error-result :git (str "Unknown git subcommand: " subcommand))
+
+            (seq extra)
+            (error-result :git (str "Unexpected positional argument(s): " (str/join " " extra)))
+
+            (and (= subcommand "report") (:dry-run? opts))
+            (error-result :git "--dry-run is only valid for git commit.")
+
+            (and (= subcommand "commit") (:porcelain? opts))
+            (error-result :git "--porcelain is only valid for git report.")
+
+            :else
+            (assoc opts :action :git-run :subcommand subcommand)))
+        (let [arg (first remaining)
+              rest-args (next remaining)]
+          (cond
+            (= arg "--root-dir")
+            (let [root (first rest-args)]
+              (cond
+                (nil? root)
+                (error-result :git "Missing value for --root-dir.")
+
+                (str/starts-with? root "-")
+                (error-result :git "Missing value for --root-dir.")
+
+                :else
+                (recur (next rest-args) (assoc opts :root root))))
+
+            (= arg "--porcelain")
+            (recur rest-args (assoc opts :porcelain? true))
+
+            (= arg "--dry-run")
+            (recur rest-args (assoc opts :dry-run? true))
+
+            (str/starts-with? arg "-")
+            (error-result :git (str "Unknown option: " arg))
+
+            :else
+            (recur rest-args (update opts :positionals conj arg))))))))
+
+(defn parse-args [args]
+  (cond
+    (empty? args)
+    {:action :top-help}
+
+    (help-options (first args))
+    {:action :top-help}
+
+    (= "git" (first args))
+    (parse-git-args (rest args))
+
+    (str/starts-with? (first args) "-")
+    (error-result :top (str "Unknown option: " (first args)))
+
+    :else
+    (error-result :top (str "Unknown command group: " (first args)))))
 
 (defn output-lines [s]
   (if (empty? s)
@@ -245,27 +314,43 @@ Examples:
         (println separator)
         (println (format "  Finished. Processed %d dirty repo(s)." dirty-count))))))
 
-(defn -main [& args]
-  (let [{:keys [root subcommand help? error] :as opts} (parse-args args)]
-    (cond
-      help?
-      (println help-text)
+(defn help-text-for [scope]
+  (case scope
+    :git git-help-text
+    top-help-text))
 
-      error
+(defn print-error! [{:keys [scope error]}]
+  (binding [*out* *err*]
+    (println error)
+    (println)
+    (println (help-text-for scope))))
+
+(defn run-git-command! [{:keys [root subcommand] :as opts}]
+  (let [repos (discover-repos root)]
+    (if (empty? repos)
       (do
-        (binding [*out* *err*]
-          (println error))
+        (println (format "No git repositories found under %s" root))
+        (System/exit 1))
+      (let [metas (mapv #(repo-metadata root %) repos)]
+        (case subcommand
+          "commit" (commit! opts metas)
+          "report" (print-report! opts metas))))))
+
+(defn -main [& args]
+  (let [{:keys [action] :as opts} (parse-args args)]
+    (case action
+      :top-help
+      (println top-help-text)
+
+      :git-help
+      (println git-help-text)
+
+      :error
+      (do
+        (print-error! opts)
         (System/exit 1))
 
-      :else
-      (let [repos (discover-repos root)]
-        (if (empty? repos)
-          (do
-            (println (format "No git repositories found under %s" root))
-            (System/exit 1))
-          (let [metas (mapv #(repo-metadata root %) repos)]
-            (case subcommand
-              "commit" (commit! opts metas)
-              "report" (print-report! opts metas))))))))
+      :git-run
+      (run-git-command! opts))))
 
 (apply -main *command-line-args*)
