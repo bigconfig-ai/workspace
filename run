@@ -6,7 +6,7 @@
             [clojure.java.shell :as shell]
             [clojure.string :as str]))
 
-(def default-root "/home/ubuntu/code/bigconfig")
+(def default-root (System/getProperty "user.dir"))
 (def git-subcommands #{"report" "commit"})
 (def help-options #{"--help" "-h"})
 (def separator "──────────────────────────────────────────")
@@ -31,7 +31,7 @@ Examples:
   bb run git commit --dry-run")
 
 (def git-help-text
-  "run git — Report dirty git repos under the bigconfig workspace,
+  "run git — Report dirty git repos under the current working directory by default,
           and optionally commit & push in each dirty repo via pi.
 
 Usage:
@@ -45,7 +45,7 @@ Commands:
             in each dirty repo.
 
 Common options:
-  --root-dir DIR   Scan DIR instead of /home/ubuntu/code/bigconfig.
+  --root-dir DIR   Scan DIR instead of the current working directory.
   --help, -h       Show this help.
 
 Report options:
