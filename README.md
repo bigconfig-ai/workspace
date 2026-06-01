@@ -59,12 +59,14 @@ The root `run` is a Babashka script (run it as `bb run ...`) that operates on th
 
 ```sh
 bb run                      # top-level help
+bb run git setup --dry-run  # preview workspace clone/worktree/fetch/pull actions
+bb run git setup            # create/update the expected clone + worktree layout
 bb run git report           # dirty/clean status for every nested git repo
 bb run git report --porcelain
 bb run git commit --dry-run # preview committing & pushing each dirty repo
 ```
 
-`bb run git commit` runs `pi --print --model deepseek-v4-flash "commit and push"` in each dirty repo; `--root-dir DIR` scans somewhere other than the current directory.
+`bb run git setup` uses SSH remotes and recreates the workspace as primary clones plus linked worktrees for the language branches; existing repos are validated and updated with `git pull --ff-only origin <branch>`. `bb run git commit` runs `pi --print --model deepseek-v4-flash "commit and push"` in each dirty repo; `--root-dir DIR` targets somewhere other than the current directory.
 
 ## BigConfig package model
 

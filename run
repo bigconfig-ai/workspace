@@ -7,10 +7,36 @@
             [clojure.string :as str]))
 
 (def default-root (System/getProperty "user.dir"))
-(def git-subcommands #{"report" "commit"})
+(def git-subcommands #{"report" "commit" "setup"})
 (def help-options #{"--help" "-h"})
 (def separator "──────────────────────────────────────────")
 (def pi-command ["pi" "--print" "--model" "deepseek-v4-flash" "commit and push"])
+
+(def workspace-projects
+  [{:name "big-config"
+    :remote "git@github.com:bigconfig-ai/big-config"
+    :primary {:rel "big-config/clojure" :branch "clojure"}
+    :worktrees [{:rel "big-config/python" :branch "python"}
+                {:rel "big-config/typescript" :branch "typescript"}]}
+   {:name "launcher"
+    :remote "git@github.com:bigconfig-ai/bc-pkg.git"
+    :primary {:rel "launcher/typescript" :branch "typescript"}
+    :worktrees [{:rel "launcher/python" :branch "python"}]}
+   {:name "once"
+    :remote "git@github.com:bigconfig-ai/once"
+    :primary {:rel "once/clojure" :branch "clojure"}
+    :worktrees [{:rel "once/python" :branch "python"}
+                {:rel "once/typescript" :branch "typescript"}]}
+   {:name "selmer"
+    :remote "git@github.com:bigconfig-ai/Selmer.git"
+    :primary {:rel "selmer/clojure" :branch "clojure"}
+    :worktrees [{:rel "selmer/python" :branch "python"}
+                {:rel "selmer/typescript" :branch "typescript"}]}
+   {:name "walter"
+    :remote "git@github.com:bigconfig-ai/walter.git"
+    :primary {:rel "walter/clojure" :branch "clojure"}
+    :worktrees [{:rel "walter/python" :branch "python"}
+                {:rel "walter/typescript" :branch "typescript"}]}])
 
 (def top-help-text
   "run — Workspace helper command groups.
@@ -20,33 +46,40 @@ Usage:
   bb run <command-group> [args]
 
 Command groups:
-  git    Git workspace report / commit helpers.
+  git    Git workspace setup / report / commit helpers.
 
 Options:
   --help, -h    Show this help.
 
 Examples:
   bb run git
+  bb run git setup --dry-run
   bb run git report
   bb run git commit --dry-run")
 
 (def git-help-text
-  "run git — Report dirty git repos under the current working directory by default,
-          and optionally commit & push in each dirty repo via pi.
+  "run git — Bootstrap, inspect, and optionally commit nested git repos.
 
 Usage:
   bb run git
+  bb run git setup [options]
   bb run git report [options]
   bb run git commit [options]
 
 Commands:
-  report    Show dirty/clean status for all git repos.
-  commit    Launch \"pi --print --model deepseek-v4-flash\" with prompt \"commit and push\"
-            in each dirty repo.
+  setup    Clone/fetch/pull the expected workspace using primary clones plus
+           linked worktrees for language branches. Existing paths are validated;
+           wrong remotes/branches/topology fail safely.
+  report   Show dirty/clean status for all git repos.
+  commit   Launch \"pi --print --model deepseek-v4-flash\" with prompt \"commit and push\"
+           in each dirty repo.
 
 Common options:
-  --root-dir DIR   Scan DIR instead of the current working directory.
+  --root-dir DIR   Use DIR instead of the current working directory.
   --help, -h       Show this help.
+
+Setup options:
+  --dry-run        Show clone/worktree/fetch/pull commands without mutating files.
 
 Report options:
   --porcelain      Machine-parseable tab-separated output.
@@ -55,9 +88,11 @@ Commit options:
   --dry-run        Show what would be done without actually running pi.
 
 Examples:
+  bb run git setup
+  bb run git setup --dry-run
+  bb run git setup --root-dir /some/other/path
   bb run git report
   bb run git report --porcelain
-  bb run git report --root-dir /some/other/path
   bb run git commit --dry-run")
 
 (defn error-result [scope message]
@@ -93,9 +128,9 @@ Examples:
             (error-result :git (str "Unexpected positional argument(s): " (str/join " " extra)))
 
             (and (= subcommand "report") (:dry-run? opts))
-            (error-result :git "--dry-run is only valid for git commit.")
+            (error-result :git "--dry-run is only valid for git setup or git commit.")
 
-            (and (= subcommand "commit") (:porcelain? opts))
+            (and (or (= subcommand "commit") (= subcommand "setup")) (:porcelain? opts))
             (error-result :git "--porcelain is only valid for git report.")
 
             :else
@@ -314,6 +349,238 @@ Examples:
         (println separator)
         (println (format "  Finished. Processed %d dirty repo(s)." dirty-count))))))
 
+(defn setup-root [root]
+  (.getAbsolutePath (io/file root)))
+
+(defn workspace-path [root rel]
+  (.getPath (io/file root rel)))
+
+(defn file-exists? [path]
+  (.exists (io/file path)))
+
+(defn ensure-parent-dir! [path]
+  (when-let [parent (.getParentFile (io/file path))]
+    (.mkdirs parent)))
+
+(defn git-worktree? [path]
+  (and (.isDirectory (io/file path))
+       (let [{:keys [exit out]} (sh-in path "git" "rev-parse" "--is-inside-work-tree")]
+         (and (zero? exit) (= "true" (str/trim out))))))
+
+(defn primary-clone-path? [path]
+  (.isDirectory (io/file path ".git")))
+
+(defn linked-worktree-path? [path]
+  (.isFile (io/file path ".git")))
+
+(defn repo-origin-url [repo]
+  (let [{:keys [exit out]} (sh-in repo "git" "remote" "get-url" "origin")]
+    (when (zero? exit)
+      (str/trim-newline out))))
+
+(defn normalize-remote [remote]
+  (str/replace (str/trim (or remote "")) #"\.git$" ""))
+
+(defn same-origin? [actual expected]
+  (= (normalize-remote actual) (normalize-remote expected)))
+
+(defn local-branch-exists? [repo branch]
+  (and (git-worktree? repo)
+       (zero? (:exit (sh-in repo "git" "show-ref" "--verify" "--quiet" (str "refs/heads/" branch))))))
+
+(defn ensure-clean-worktree! [{:keys [rel]} path]
+  (let [status-lines (git-lines path "status" "--porcelain")]
+    (when (seq status-lines)
+      (throw (ex-info (format "%s has uncommitted changes; refusing to pull" rel)
+                      {:path path
+                       :status-lines status-lines})))))
+
+(defn canonical-path [path]
+  (.getCanonicalPath (io/file path)))
+
+(defn git-common-dir [repo]
+  (let [{:keys [exit out]} (sh-in repo "git" "rev-parse" "--git-common-dir")]
+    (when (zero? exit)
+      (let [common-dir (str/trim-newline out)
+            common-file (io/file common-dir)
+            resolved (if (.isAbsolute common-file)
+                       common-file
+                       (io/file repo common-dir))]
+        (.getCanonicalPath resolved)))))
+
+(defn validate-linked-common-dir! [primary-path {:keys [rel]} path]
+  (let [actual (git-common-dir path)
+        expected (canonical-path (io/file primary-path ".git"))]
+    (when-not (= actual expected)
+      (throw (ex-info (format "%s belongs to git common dir %s; expected %s" rel (or actual "<missing>") expected)
+                      {:path path
+                       :common-dir actual
+                       :expected expected})))))
+
+(defn shell-quote [s]
+  (let [s (str s)]
+    (if (re-matches #"[A-Za-z0-9_./:@%+=,-]+" s)
+      s
+      (str "'" (str/replace s "'" "'\"'\"'") "'"))))
+
+(defn command-preview [dir args]
+  (let [cmd (str/join " " (map shell-quote args))]
+    (if dir
+      (str "cd " (shell-quote dir) " && " cmd)
+      cmd)))
+
+(defn inc-count! [counts k]
+  (swap! counts update k (fnil inc 0)))
+
+(defn print-setup-row! [mark rel message]
+  (println (format "  %s  %-30s  %s" mark rel message)))
+
+(defn run-git-setup-command! [{:keys [dry-run?]} counts dir args]
+  (if dry-run?
+    (do
+      (inc-count! counts :dry-run)
+      (println (str "     (dry-run) would run: " (command-preview dir args)))
+      0)
+    (let [process-opts (cond-> {:in :inherit
+                                :out :inherit
+                                :err :inherit
+                                :continue true}
+                         dir (assoc :dir dir))
+          {:keys [exit]} (apply process/shell process-opts args)]
+      (when-not (zero? exit)
+        (throw (ex-info (format "Command failed with exit code %d: %s" exit (command-preview dir args))
+                        {:exit exit
+                         :dir dir
+                         :args args})))
+      exit)))
+
+(defn validate-existing-path! [{:keys [remote]} {:keys [rel branch]} path kind]
+  (cond
+    (not (git-worktree? path))
+    (throw (ex-info (format "%s exists but is not a git worktree: %s" rel path) {:path path}))
+
+    (and (= kind :primary) (not (primary-clone-path? path)))
+    (throw (ex-info (format "%s must be the primary clone (.git directory), but is not: %s" rel path) {:path path}))
+
+    (and (= kind :linked) (not (linked-worktree-path? path)))
+    (throw (ex-info (format "%s must be a linked worktree (.git file), but is not: %s" rel path) {:path path}))
+
+    :else
+    (let [origin (repo-origin-url path)
+          current-branch (git-branch path)]
+      (when-not (same-origin? origin remote)
+        (throw (ex-info (format "%s has origin %s; expected %s" rel (or origin "<missing>") remote)
+                        {:path path
+                         :origin origin
+                         :expected remote})))
+      (when-not (= branch current-branch)
+        (throw (ex-info (format "%s is on branch %s; expected %s" rel current-branch branch)
+                        {:path path
+                         :branch current-branch
+                         :expected branch})))
+      true)))
+
+(defn clone-primary! [opts counts {:keys [remote]} {:keys [rel branch]} path]
+  (print-setup-row! "＋" rel (str "clone " branch))
+  (when-not (:dry-run? opts)
+    (ensure-parent-dir! path))
+  (run-git-setup-command! opts counts nil ["git" "clone" "--branch" branch remote path])
+  (when-not (:dry-run? opts)
+    (inc-count! counts :cloned)))
+
+(defn fetch-primary! [opts counts {:keys [rel]} path]
+  (print-setup-row! "↻" rel "fetch --prune origin")
+  (run-git-setup-command! opts counts path ["git" "fetch" "--prune" "origin"])
+  (when-not (:dry-run? opts)
+    (inc-count! counts :updated)))
+
+(defn worktree-add-args [primary-path branch path]
+  (if (local-branch-exists? primary-path branch)
+    ["git" "worktree" "add" path branch]
+    ["git" "worktree" "add" "--track" "-b" branch path (str "origin/" branch)]))
+
+(defn add-worktree! [opts counts primary-path {:keys [rel branch]} path]
+  (print-setup-row! "＋" rel (str "worktree add " branch))
+  (when-not (:dry-run? opts)
+    (ensure-parent-dir! path))
+  (run-git-setup-command! opts counts primary-path (worktree-add-args primary-path branch path))
+  (when-not (:dry-run? opts)
+    (inc-count! counts :worktrees-created)))
+
+(defn pull-worktree! [opts counts {:keys [rel branch] :as leaf} path]
+  (when (git-worktree? path)
+    (ensure-clean-worktree! leaf path))
+  (print-setup-row! "↻" rel (str "pull --ff-only origin " branch))
+  (run-git-setup-command! opts counts path ["git" "pull" "--ff-only" "origin" branch])
+  (when-not (:dry-run? opts)
+    (inc-count! counts :updated)))
+
+(defn validate-or-create-primary! [opts counts project primary primary-path]
+  (if (file-exists? primary-path)
+    (do
+      (validate-existing-path! project primary primary-path :primary)
+      (inc-count! counts :verified)
+      (print-setup-row! "✓" (:rel primary) "validated primary clone"))
+    (clone-primary! opts counts project primary primary-path)))
+
+(defn validate-or-create-worktree! [opts counts primary-path project worktree worktree-path]
+  (if (file-exists? worktree-path)
+    (do
+      (validate-existing-path! project worktree worktree-path :linked)
+      (validate-linked-common-dir! primary-path worktree worktree-path)
+      (inc-count! counts :verified)
+      (print-setup-row! "✓" (:rel worktree) "validated linked worktree"))
+    (add-worktree! opts counts primary-path worktree worktree-path)))
+
+(defn setup-project! [{:keys [root] :as opts} counts {:keys [name primary worktrees] :as project}]
+  (println separator)
+  (println (format "  %s" name))
+  (let [primary-path (workspace-path root (:rel primary))]
+    (validate-or-create-primary! opts counts project primary primary-path)
+    (fetch-primary! opts counts primary primary-path)
+    (doseq [worktree worktrees
+            :let [worktree-path (workspace-path root (:rel worktree))]]
+      (validate-or-create-worktree! opts counts primary-path project worktree worktree-path))
+    (doseq [leaf (cons primary worktrees)
+            :let [leaf-path (workspace-path root (:rel leaf))]]
+      (pull-worktree! opts counts leaf leaf-path))))
+
+(defn print-setup-summary! [root counts]
+  (let [{:keys [cloned worktrees-created updated verified dry-run errors]} counts]
+    (println)
+    (println separator)
+    (println (format "  Git Setup — %s" root))
+    (println (format "  Cloned:             %d" (or cloned 0)))
+    (println (format "  Worktrees created:  %d" (or worktrees-created 0)))
+    (println (format "  Existing verified:  %d" (or verified 0)))
+    (println (format "  Updated:            %d" (or updated 0)))
+    (println (format "  Dry-run commands:   %d" (or dry-run 0)))
+    (println (format "  Errors:             %d" (or errors 0)))
+    (println separator)))
+
+(defn setup! [{:keys [root] :as opts}]
+  (let [root (setup-root root)
+        opts (assoc opts :root root)
+        counts (atom {:cloned 0
+                      :worktrees-created 0
+                      :updated 0
+                      :verified 0
+                      :dry-run 0
+                      :errors 0})]
+    (println (format "Setting up BigConfig git workspace under %s%s"
+                     root
+                     (if (:dry-run? opts) " (dry-run)" "")))
+    (doseq [project workspace-projects]
+      (try
+        (setup-project! opts counts project)
+        (catch Exception e
+          (inc-count! counts :errors)
+          (binding [*out* *err*]
+            (println (format "  ✗  %s  %s" (:name project) (.getMessage e)))))))
+    (print-setup-summary! root @counts)
+    (when (pos? (:errors @counts))
+      (System/exit 1))))
+
 (defn help-text-for [scope]
   (case scope
     :git git-help-text
@@ -326,15 +593,19 @@ Examples:
     (println (help-text-for scope))))
 
 (defn run-git-command! [{:keys [root subcommand] :as opts}]
-  (let [repos (discover-repos root)]
-    (if (empty? repos)
-      (do
-        (println (format "No git repositories found under %s" root))
-        (System/exit 1))
-      (let [metas (mapv #(repo-metadata root %) repos)]
-        (case subcommand
-          "commit" (commit! opts metas)
-          "report" (print-report! opts metas))))))
+  (case subcommand
+    "setup"
+    (setup! opts)
+
+    (let [repos (discover-repos root)]
+      (if (empty? repos)
+        (do
+          (println (format "No git repositories found under %s" root))
+          (System/exit 1))
+        (let [metas (mapv #(repo-metadata root %) repos)]
+          (case subcommand
+            "commit" (commit! opts metas)
+            "report" (print-report! opts metas)))))))
 
 (defn -main [& args]
   (let [{:keys [action] :as opts} (parse-args args)]
