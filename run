@@ -27,6 +27,14 @@
     :primary {:rel "once/clojure" :branch "clojure"}
     :worktrees [{:rel "once/python" :branch "python"}
                 {:rel "once/typescript" :branch "typescript"}]}
+   {:name "once-bigconfig"
+    :remote "git@github.com:bigconfig-ai/once-bigconfig.git"
+    :primary {:rel "once-bigconfig/main" :branch "main"}
+    :worktrees []}
+   {:name "once-bigconfig-marketplace"
+    :remote "git@github.com:bigconfig-ai/once-bigconfig-marketplace.git"
+    :primary {:rel "once-bigconfig-marketplace/main" :branch "main"}
+    :worktrees []}
    {:name "selmer"
     :remote "git@github.com:bigconfig-ai/Selmer.git"
     :primary {:rel "selmer/clojure" :branch "clojure"}

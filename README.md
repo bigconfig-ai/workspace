@@ -66,7 +66,7 @@ bb run git report --porcelain
 bb run git commit --dry-run # preview committing & pushing each dirty repo
 ```
 
-`bb run git setup` uses SSH remotes and recreates the workspace as primary clones plus linked worktrees for the language branches; existing repos are validated and updated with `git pull --ff-only origin <branch>`. `bb run git commit` runs `pi --print --model deepseek-v4-flash "commit and push"` in each dirty repo; `--root-dir DIR` targets somewhere other than the current directory.
+`bb run git setup` uses SSH remotes and recreates the workspace as seven primary clones plus nine linked worktrees for the language branches; existing repos are validated and updated with `git pull --ff-only origin <branch>`. `bb run git commit` runs `pi --print --model deepseek-v4-flash "commit and push"` in each dirty repo; `--root-dir DIR` targets somewhere other than the current directory.
 
 ## BigConfig package model
 
