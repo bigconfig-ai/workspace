@@ -9,9 +9,9 @@ This is a multi-language polyrepo holding four nested libraries/packages (each i
 ```
 bigconfig/
 ├── selmer/{clojure,python,typescript}      # Django-style template engine
-├── big-config/{clojure,python,typescript}  # Workflow + render engine (uses selmer)
-├── once/{clojure,python,typescript}        # Infra automation CLI (uses big-config)
-├── walter/{clojure,python,typescript}      # Dev-workstation provisioner (uses once + big-config)
+├── big-config/{clojure,python,typescript}  # BigConfig SDK workflow + render engine (uses selmer)
+├── once/{clojure,python,typescript}        # Infra automation CLI (uses BigConfig SDK)
+├── walter/{clojure,python,typescript}      # Dev-workstation provisioner (uses once + BigConfig SDK)
 └── launcher/{python,typescript}            # `bc-pkg` bootstrap launcher (PyPI / npm)
 ```
 
@@ -22,19 +22,19 @@ The root directory itself is not a git repo and has no build system; it's a work
 ## Dependency direction
 
 ```
-once / walter  ──depends-on──▶  big-config  ──depends-on──▶  selmer
+once / walter  ──depends-on──▶  BigConfig SDK (`big-config`)  ──depends-on──▶  selmer
 walter         ──also-depends-on──▶  once
 ```
 
 Within a single language, projects consume each other either as published packages or as local-path overrides:
 
-- **Clojure**: `once/clojure/deps.edn` pins big-config by `:git/sha` (under the coordinate `io.github.amiorin/big-config`) and has a commented `:local/root "../../big-config/clojure"` line — swap to develop against local source. `walter/clojure/deps.edn` pins big-config (with an explicit `:git/url` to `bigconfig-ai/big-config`) and `io.github.bigconfig-ai/once`. `big-config/clojure` uses Selmer from Maven (`selmer/selmer 1.13.1`).
-- **Python**: `once/python/pyproject.toml` pins `big-config` to a Git commit; `walter/python/pyproject.toml` pins `big-config` and `once` to Git commits; `big-config/python/pyproject.toml` pins `selmer` to a Git commit. Use `uv sync` to resolve.
-- **TypeScript**: `once/typescript/package.json` pins `big-config` to a GitHub commit; `walter/typescript/package.json` pins `big-config` and `once` to GitHub commits; `big-config/typescript/package.json` pins `selmer` to a GitHub commit. To develop against local source, override a dependency with a `file:` path (e.g. `"big-config": "file:../../big-config/typescript"`) and re-run `npm install`.
+- **Clojure**: `once/clojure/deps.edn` pins the Clojure SDK package (`big-config`) by `:git/sha` (under the coordinate `io.github.amiorin/big-config`) and has a commented `:local/root "../../big-config/clojure"` line — swap to develop against local SDK source. `walter/clojure/deps.edn` pins the Clojure SDK package (with an explicit `:git/url` to `bigconfig-ai/big-config`) and `io.github.bigconfig-ai/once`. The Clojure SDK (`big-config/clojure`) uses Selmer from Maven (`selmer/selmer 1.13.1`).
+- **Python**: `once/python/pyproject.toml` pins the Python SDK package (`big-config`) to a Git commit; `walter/python/pyproject.toml` pins the Python SDK package and `once` to Git commits; the Python SDK (`big-config/python`) pins `selmer` to a Git commit. Use `uv sync` to resolve.
+- **TypeScript**: `once/typescript/package.json` pins the TypeScript SDK package (`big-config`) to a GitHub commit; `walter/typescript/package.json` pins the TypeScript SDK package and `once` to GitHub commits; the TypeScript SDK (`big-config/typescript`) pins `selmer` to a GitHub commit. To develop against local SDK source, override a dependency with a `file:` path (e.g. `"big-config": "file:../../big-config/typescript"`) and re-run `npm install`.
 
-Cross-language work that touches the engine surface (e.g., adding a step type, a renderer feature, or a workflow primitive) needs the change applied in all three implementations of that library, then re-verified in the consumers downstream.
+Cross-language work that touches the engine surface (e.g., adding a step type, a renderer feature, or a workflow primitive) needs the change applied in all three SDK implementations, then re-verified in the consumers downstream.
 
-The `launcher/` projects (`bc-pkg`) are independent of the `selmer → big-config → once` chain: they are bootstrap CLIs that resolve a GitHub-pinned BigConfig package and forward commands to it. They do not import any of the three libraries.
+The `launcher/` projects (`bc-pkg`) are independent of the `selmer → BigConfig SDK (big-config) → once` chain: they are bootstrap CLIs that resolve a GitHub-pinned BigConfig package and forward commands to it. They do not import any of the three SDK libraries.
 
 ## Per-language commands
 
@@ -66,15 +66,15 @@ These are the load-bearing ideas; the per-language `CLAUDE.md` files have the de
 - **Six-stage create pipeline** (`once package create`): `tofu` → `tofu-smtp` → `tofu-dns` → `tofu-smtp-post` → `ansible-local` → `ansible`. `delete` reverses the four Tofu stages.
 - **Profiles** live in `options.{clj,py,ts}` and compose private sub-profile maps (cloud provider × `resend` × `cloudflare` × `r2` × `deploy`) into named application profiles. An active profile is selected by a single top-level binding (`(def bb ...)` in Clojure; `export const bb = ...` in TypeScript; analogous in Python).
 - **Parameter flow**: profile params → `BC_PAR_*` env-var overrides (uppercased, hyphens/dots → underscores) → params extracted from Tofu outputs of earlier stages.
-- **Templates** under `src/resources/.../tools/` use `<{ var }>` for file content and `{{ var }}` for directory selection (provider switching). Rendered into `.dist/` by `big-config`'s renderer.
-- **Plugin system**: the remote-state backend (S3 / R2 / local) is injected after each render step via `big-config`'s pluggable step registry.
+- **Templates** under `src/resources/.../tools/` use `<{ var }>` for file content and `{{ var }}` for directory selection (provider switching). Rendered into `.dist/` by the BigConfig SDK renderer.
+- **Plugin system**: the remote-state backend (S3 / R2 / local) is injected after each render step via the SDK's pluggable step registry.
 
-## Workflow engine concepts (shared across all three `big-config` implementations)
+## Workflow engine concepts (shared across all three BigConfig SDK implementations)
 
 - An `opts` map (`Record<string, any>` / `dict` / Clojure map) is threaded through step functions. Reserved keys are namespaced strings: `big-config/exit` (0 = success), `big-config/err`, `big-config/stack-trace`, `big-config.workflow/steps`, `big-config.workflow/params`, etc.
 - Step functions take `opts` and return `opts`. Composition: `core.workflow` / `createWorkflow` / equivalent assembles a sequence of steps; `workflow_star` / `createWorkflowStar` / `create-workflow-star` does subworkflow isolation; `run_steps` / `runSteps` / `run-steps` runs a named-step sequence.
 - Shell-command execution goes through a `runner` seam (`big-config.run/runner`, `run.runner`, etc.) so tests can swap in a fake runner instead of spawning processes.
-- Do not add error handling for cases that cannot happen — step failures are reported through `big-config/exit` and `big-config/err`, not exceptions.
+- Do not add error handling for cases that cannot happen — SDK step failures are reported through `big-config/exit` and `big-config/err`, not exceptions.
 
 ## Launcher (`bc-pkg`) concepts
 

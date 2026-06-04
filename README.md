@@ -1,13 +1,13 @@
 # BigConfig Workspace
 
-This workspace contains the BigConfig family of libraries and packages, implemented across Clojure, Python, and TypeScript.
+This workspace contains the BigConfig family of SDKs and packages, implemented across Clojure, Python, and TypeScript.
 
 ## Projects
 
 | Directory | Purpose | Languages |
 | --- | --- | --- |
 | `selmer/` | Django-style template engine and ports. | Clojure, Python, TypeScript |
-| `big-config/` | Workflow, render, command-runner, locking, and OpenTofu helper engine. | Clojure, Python, TypeScript |
+| `big-config/` | BigConfig SDK: workflow, render, command-runner, locking, and OpenTofu helper engine. | Clojure, Python, TypeScript |
 | `once/` | Infrastructure automation package for deploying ONCE with OpenTofu and Ansible. | Clojure, Python, TypeScript |
 | `walter/` | Infrastructure automation package for provisioning developer workstations. | Clojure, Python, TypeScript |
 | `launcher/` | `bc-pkg` bootstrap launcher for GitHub-pinned BigConfig packages. | Python, TypeScript |
@@ -15,7 +15,7 @@ This workspace contains the BigConfig family of libraries and packages, implemen
 Dependency direction:
 
 ```text
-once / walter  ->  big-config  ->  selmer
+once / walter  ->  BigConfig SDK (`big-config`)  ->  selmer
 launcher       ->  target package selected at runtime
 ```
 
@@ -80,7 +80,7 @@ BigConfig packages render templates and orchestrate tools through named workflow
 
 Template conventions used by the packages:
 
-- `<{ var }>` renders BigConfig/Selmer variables in file content;
+- `<{ var }>` renders BigConfig SDK/Selmer variables in file content;
 - `{{ var }}` is used for directory/provider selection and for templates that must preserve Ansible-style braces.
 
 Generated `.dist/` directories are build artifacts and should not be edited directly.
@@ -89,11 +89,11 @@ Generated `.dist/` directories are build artifacts and should not be edited dire
 
 ### Selmer
 
-Selmer is the template engine layer. The Clojure implementation tracks the upstream Selmer project; Python and TypeScript are ports used by the language-native BigConfig implementations.
+Selmer is the template engine layer. The Clojure implementation tracks the upstream Selmer project; Python and TypeScript are ports used by the language-native BigConfig SDK implementations.
 
-### BigConfig
+### BigConfig SDK
 
-BigConfig provides the workflow engine, renderer, shell runner, Git lock helpers, plugin registry, custom filters, and OpenTofu/Terraform construct helpers consumed by packages such as Once and Walter.
+The SDK provides the workflow engine, renderer, shell runner, Git lock helpers, plugin registry, custom filters, and OpenTofu/Terraform construct helpers consumed by packages such as Once and Walter.
 
 ### Once
 
