@@ -35,6 +35,10 @@
     :remote "git@github.com:bigconfig-ai/once-bigconfig-marketplace.git"
     :primary {:rel "once-bigconfig-marketplace/main" :branch "main"}
     :worktrees []}
+   {:name "once-ai"
+    :remote "git@github.com:bigconfig-ai/once-ai.git"
+    :primary {:rel "once-ai/main" :branch "main"}
+    :worktrees []}
    {:name "selmer"
     :remote "git@github.com:bigconfig-ai/Selmer.git"
     :primary {:rel "selmer/clojure" :branch "clojure"}

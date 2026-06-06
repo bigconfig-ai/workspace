@@ -105,7 +105,7 @@ Both launchers must produce equivalent on-disk artifacts for the same `<owner/re
 The root `run` is a Babashka script (namespace `run`) exposing grouped command helpers for the workspace itself (not a BigConfig package):
 
 - `bb run` — top-level help.
-- `bb run git setup [--dry-run] [--root-dir DIR]` — clone/update the expected workspace with SSH remotes, seven primary clones, and nine linked worktrees for sibling language branches; existing repos are validated and pulled with `--ff-only origin <branch>`.
+- `bb run git setup [--dry-run] [--root-dir DIR]` — clone/update the expected workspace with SSH remotes, eight primary clones, and nine linked worktrees for sibling language branches; existing repos are validated and pulled with `--ff-only origin <branch>`.
 - `bb run git report [--porcelain] [--root-dir DIR]` — report dirty/clean/no-tracked-files status for every nested git repo.
 - `bb run git commit [--dry-run] [--root-dir DIR]` — run `pi --print --model deepseek-v4-flash "commit and push"` in each dirty repo.
 
