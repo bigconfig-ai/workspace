@@ -18,6 +18,14 @@
     :primary {:rel "big-config/clojure" :branch "clojure"}
     :worktrees [{:rel "big-config/python" :branch "python"}
                 {:rel "big-config/typescript" :branch "typescript"}]}
+   {:name "businessplan"
+    :remote "git@github.com:bigconfig-ai/businessplan.git"
+    :primary {:rel "businessplan" :branch "main"}
+    :worktrees []}
+   {:name "credentials"
+    :remote "git@github.com:bigconfig-ai/credentials.git"
+    :primary {:rel "credentials" :branch "main"}
+    :worktrees []}
    {:name "launcher"
     :remote "git@github.com:bigconfig-ai/bc-pkg.git"
     :primary {:rel "launcher/typescript" :branch "typescript"}
