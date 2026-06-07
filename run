@@ -52,6 +52,10 @@
     :primary {:rel "selmer/clojure" :branch "clojure"}
     :worktrees [{:rel "selmer/python" :branch "python"}
                 {:rel "selmer/typescript" :branch "typescript"}]}
+   {:name "skills"
+    :remote "git@github.com:bigconfig-ai/skills.git"
+    :primary {:rel "skills" :branch "main"}
+    :worktrees []}
    {:name "walter"
     :remote "git@github.com:bigconfig-ai/walter.git"
     :primary {:rel "walter/clojure" :branch "clojure"}
