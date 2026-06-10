@@ -94,9 +94,9 @@ Commands:
   setup    Clone/fetch/pull the expected workspace using primary clones plus
            linked worktrees for language branches. Existing paths are validated;
            wrong remotes/branches/topology fail safely.
-  report   Show dirty/clean status for all git repos.
-  commit   Launch \"pi --print --model deepseek-v4-flash\" with prompt \"commit and push\"
-           in each dirty repo.
+  report   Show dirty/clean/unpushed/upstream status for all git repos.
+  commit   Run \"pi --print --model deepseek-v4-flash\" with prompt \"commit and push\"
+           in dirty repos, and direct \"git push\" in clean repos with unpushed commits.
 
 Common options:
   --root-dir DIR   Use DIR instead of the current working directory.
@@ -109,7 +109,7 @@ Report options:
   --porcelain      Machine-parseable tab-separated output.
 
 Commit options:
-  --dry-run        Show what would be done without actually running pi.
+  --dry-run        Show what would be done without actually running pi or git push.
 
 Examples:
   bb run git setup
@@ -233,6 +233,27 @@ Examples:
       (str/trim-newline out)
       "UNKNOWN")))
 
+(defn git-upstream [repo]
+  (let [{:keys [exit out]} (sh-in repo "git" "rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{upstream}")]
+    (when (zero? exit)
+      (let [upstream (str/trim-newline out)]
+        (when-not (empty? upstream)
+          upstream)))))
+
+(defn parse-count [s]
+  (if (empty? (or s ""))
+    0
+    (Long/parseLong s)))
+
+(defn git-divergence [repo]
+  (let [{:keys [exit out]} (sh-in repo "git" "rev-list" "--left-right" "--count" "@{upstream}...HEAD")]
+    (if (zero? exit)
+      (let [[behind ahead] (str/split (str/trim out) #"\s+")]
+        {:ahead-count (parse-count ahead)
+         :behind-count (parse-count behind)})
+      {:ahead-count 0
+       :behind-count 0})))
+
 (defn rel-path [root repo]
   (let [prefix (str root "/")]
     (if (str/starts-with? repo prefix)
@@ -246,9 +267,25 @@ Examples:
                        []
                        (git-lines repo "status" "--porcelain"))
         dirty-count (count status-lines)
+        upstream (git-upstream repo)
+        {:keys [ahead-count behind-count]} (if upstream
+                                             (git-divergence repo)
+                                             {:ahead-count 0
+                                              :behind-count 0})
+        no-tracked? (zero? tracked-count)
+        dirty? (pos? dirty-count)
+        no-upstream? (nil? upstream)
+        unpushed? (pos? ahead-count)
+        diverged? (and (pos? ahead-count) (pos? behind-count))
         state (cond
-                (zero? tracked-count) :no-tracked-files
-                (pos? dirty-count) :dirty
+                no-tracked? :no-tracked-files
+                (and dirty? diverged?) :dirty-diverged
+                diverged? :diverged
+                (and dirty? no-upstream?) :dirty-no-upstream
+                no-upstream? :no-upstream
+                (and dirty? unpushed?) :dirty-unpushed
+                dirty? :dirty
+                unpushed? :unpushed
                 :else :clean)]
     {:repo repo
      :rel (rel-path root repo)
@@ -256,6 +293,14 @@ Examples:
      :tracked-count tracked-count
      :status-lines status-lines
      :dirty-count dirty-count
+     :upstream upstream
+     :ahead-count ahead-count
+     :behind-count behind-count
+     :no-tracked? no-tracked?
+     :dirty? dirty?
+     :no-upstream? no-upstream?
+     :unpushed? unpushed?
+     :diverged? diverged?
      :state state}))
 
 (defn status-label [xy]
@@ -280,55 +325,131 @@ Examples:
 
 (defn repo-counts [metas]
   {:total (count metas)
-   :dirty (count (filter #(= :dirty (:state %)) metas))
-   :clean (count (filter #(= :clean (:state %)) metas))})
+   :dirty (count (filter :dirty? metas))
+   :clean (count (filter #(and (not (:no-tracked? %)) (not (:dirty? %))) metas))
+   :unpushed (count (filter :unpushed? metas))
+   :diverged (count (filter :diverged? metas))
+   :behind (count (filter #(pos? (:behind-count %)) metas))
+   :no-upstream (count (filter :no-upstream? metas))
+   :no-tracked-files (count (filter :no-tracked? metas))})
+
+(defn pluralize [n singular plural]
+  (str n " " (if (= 1 n) singular plural)))
+
+(defn human-mark [meta]
+  (cond
+    (:no-tracked? meta) "⚠"
+    (:diverged? meta) "↕"
+    (:dirty? meta) "✗"
+    (:unpushed? meta) "⇡"
+    (:no-upstream? meta) "⚠"
+    (pos? (:behind-count meta)) "⇣"
+    :else "✓"))
+
+(defn human-details [meta]
+  (let [upstream (or (:upstream meta) "<no upstream>")]
+    (cond-> []
+      (:no-tracked? meta)
+      (conj "no tracked files")
+
+      (and (not (:no-tracked? meta)) (:dirty? meta))
+      (conj (pluralize (:dirty-count meta) "dirty file" "dirty files"))
+
+      (and (not (:no-tracked? meta))
+           (not (:dirty? meta))
+           (or (:no-upstream? meta)
+               (and (not (:diverged? meta))
+                    (not (:unpushed? meta))
+                    (zero? (:behind-count meta)))))
+      (conj "clean")
+
+      (:diverged? meta)
+      (conj (format "diverged from %s: %d ahead, %d behind" upstream (:ahead-count meta) (:behind-count meta)))
+
+      (and (not (:diverged? meta)) (pos? (:ahead-count meta)))
+      (conj (format "%s to %s" (pluralize (:ahead-count meta) "unpushed commit" "unpushed commits") upstream))
+
+      (and (not (:diverged? meta)) (pos? (:behind-count meta)))
+      (conj (format "%d behind %s" (:behind-count meta) upstream))
+
+      (:no-upstream? meta)
+      (conj "no upstream"))))
 
 (defn human-row [meta]
-  (case (:state meta)
-    :no-tracked-files
-    (format "  ⚠  %s  (%s)  —  no tracked files" (:rel meta) (:branch meta))
+  (format "  %s  %s  (%s)  —  %s"
+          (human-mark meta)
+          (:rel meta)
+          (:branch meta)
+          (str/join ", " (human-details meta))))
 
-    :dirty
-    (format "  ✗  %s  (%s)  —  %d dirty file(s)" (:rel meta) (:branch meta) (:dirty-count meta))
-
-    :clean
-    (format "  ✓  %s  (%s)  —  clean" (:rel meta) (:branch meta))))
+(defn porcelain-label [meta]
+  (cond
+    (:no-tracked? meta) "NO-TRACKED-FILES"
+    (and (:dirty? meta) (:diverged? meta)) "DIRTY-DIVERGED"
+    (:diverged? meta) "DIVERGED"
+    (and (:dirty? meta) (:no-upstream? meta)) "DIRTY-NO-UPSTREAM"
+    (:no-upstream? meta) "NO-UPSTREAM"
+    (and (:dirty? meta) (:unpushed? meta)) "DIRTY-UNPUSHED"
+    (:dirty? meta) "DIRTY"
+    (:unpushed? meta) "UNPUSHED"
+    :else "CLEAN"))
 
 (defn porcelain-row [meta]
-  (case (:state meta)
-    :no-tracked-files
-    (str/join "\t" ["NO-TRACKED-FILES" (:rel meta) (:branch meta)])
-
-    :dirty
-    (str/join "\t" ["DIRTY" (:rel meta) (:branch meta) (:dirty-count meta)])
-
-    :clean
-    (str/join "\t" ["CLEAN" (:rel meta) (:branch meta)])))
+  (str/join "\t" [(porcelain-label meta)
+                   (:rel meta)
+                   (:branch meta)
+                   (str (:dirty-count meta))
+                   (str (:ahead-count meta))
+                   (str (:behind-count meta))
+                   (or (:upstream meta) "NO-UPSTREAM")]))
 
 (defn print-report! [{:keys [root porcelain?]} metas]
-  (let [{:keys [total dirty clean]} (repo-counts metas)]
+  (let [{:keys [total dirty clean unpushed diverged behind no-upstream no-tracked-files]} (repo-counts metas)]
     (doseq [meta metas]
       (if porcelain?
         (println (porcelain-row meta))
         (do
           (println (human-row meta))
-          (when (= :dirty (:state meta))
+          (when (:dirty? meta)
             (doseq [line (:status-lines meta)
                     :let [{:keys [label path]} (classify-porcelain-line line)]]
               (printf "       • %s  %s%n" label path))))))
     (if porcelain?
-      (println (str/join "\t" ["SUMMARY" (str total " repos") (str dirty " dirty") (str clean " clean")]))
+      (println (str/join "\t" ["SUMMARY"
+                               (str total " repos")
+                               (str dirty " dirty")
+                               (str clean " clean")
+                               (str unpushed " unpushed")
+                               (str diverged " diverged")
+                               (str behind " behind")
+                               (str no-upstream " no-upstream")
+                               (str no-tracked-files " no-tracked-files")]))
       (do
         (println)
         (println separator)
-        (println (format "  Git Dirty Report — %s" root))
-        (println (format "  Total repos:  %d" total))
-        (println (format "  Dirty:        %d" dirty))
-        (println (format "  Clean:        %d" clean))
+        (println (format "  Git Dirty/Push Report — %s" root))
+        (println (format "  Total repos:       %d" total))
+        (println (format "  Dirty:            %d" dirty))
+        (println (format "  Clean worktrees:  %d" clean))
+        (println (format "  Unpushed:         %d" unpushed))
+        (println (format "  Diverged:         %d" diverged))
+        (println (format "  Behind:           %d" behind))
+        (println (format "  No upstream:      %d" no-upstream))
+        (println (format "  No tracked files: %d" no-tracked-files))
         (when (pos? dirty)
           (println)
           (println "  Dirty repos:")
-          (doseq [meta (filter #(= :dirty (:state %)) metas)]
+          (doseq [meta (filter :dirty? metas)]
+            (printf "    • %s%n" (:rel meta))))
+        (when (pos? unpushed)
+          (println)
+          (println "  Unpushed repos:")
+          (doseq [meta (filter :unpushed? metas)]
+            (printf "    • %s  (%d ahead, %d behind)%n" (:rel meta) (:ahead-count meta) (:behind-count meta))))
+        (when (pos? no-upstream)
+          (println)
+          (println "  No-upstream repos:")
+          (doseq [meta (filter :no-upstream? metas)]
             (printf "    • %s%n" (:rel meta))))
         (println separator)))))
 
@@ -342,36 +463,102 @@ Examples:
                               pi-command)]
     exit))
 
-(defn print-command-preview! []
-  (println "  (dry-run) would run: pi --print --model deepseek-v4-flash 'commit and push'"))
+(defn run-git-push! [repo]
+  (let [{:keys [exit]} (process/shell {:dir repo
+                                       :in :inherit
+                                       :out :inherit
+                                       :err :inherit
+                                       :continue true}
+                                      "git" "push")]
+    exit))
+
+(defn commit-action [meta]
+  (cond
+    (:no-tracked? meta) nil
+    (:diverged? meta) :skip-diverged
+    (:dirty? meta) :pi
+    (and (:unpushed? meta) (zero? (:behind-count meta)) (not (:no-upstream? meta))) :push
+    :else nil))
+
+(defn command-label [action]
+  (case action
+    :pi "pi --print --model deepseek-v4-flash 'commit and push'"
+    :push "git push"
+    :skip-diverged "skip (diverged)"))
+
+(defn commit-reason [meta]
+  (let [parts (cond-> []
+                (:dirty? meta)
+                (conj (pluralize (:dirty-count meta) "dirty file" "dirty files"))
+
+                (pos? (:ahead-count meta))
+                (conj (pluralize (:ahead-count meta) "unpushed commit" "unpushed commits"))
+
+                (pos? (:behind-count meta))
+                (conj (pluralize (:behind-count meta) "behind commit" "behind commits"))
+
+                (:no-upstream? meta)
+                (conj "no upstream"))]
+    (if (seq parts)
+      (str/join ", " parts)
+      "no local action needed")))
+
+(defn print-command-preview! [action]
+  (println (str "  (dry-run) would run: " (command-label action))))
+
+(defn run-commit-action! [action repo]
+  (case action
+    :pi (run-pi! repo)
+    :push (run-git-push! repo)))
 
 (defn commit! [{:keys [dry-run?]} metas]
-  (let [dirty-metas (vec (filter #(= :dirty (:state %)) metas))
-        dirty-count (count dirty-metas)]
-    (if (zero? dirty-count)
-      (println "No dirty repos to commit. All clean.")
+  (let [action-metas (->> metas
+                          (keep (fn [meta]
+                                  (when-let [action (commit-action meta)]
+                                    (assoc meta :commit-action action))))
+                          vec)
+        action-count (count action-metas)
+        skipped-count (atom 0)]
+    (if (zero? action-count)
+      (println "No repos with changes or unpushed commits to process.")
       (do
-        (println (format "Running 'pi --print --model deepseek-v4-flash \"commit and push\"' in %d dirty repo(s)..." dirty-count))
+        (println (format "Processing %d repo(s) with changes, unpushed commits, or divergence..." action-count))
         (println)
-        (doseq [[i meta] (map-indexed vector dirty-metas)]
-          (println separator)
-          (println (format "  [%d/%d]  %s  (%s)  —  %d dirty file(s)"
-                           i (dec dirty-count) (:rel meta) (:branch meta) (:dirty-count meta)))
-          (println)
-          (if dry-run?
-            (print-command-preview!)
-            (let [exit (try
-                         (run-pi! (:repo meta))
-                         (catch Exception e
-                           (binding [*out* *err*]
-                             (println (str "Failed to run pi: " (.getMessage e))))
-                           1))]
-              (when-not (zero? exit)
-                (System/exit exit))
-              (println)
-              (println (format "  Done — exit code: %d" exit)))))
+        (doseq [[i meta] (map-indexed vector action-metas)]
+          (let [action (:commit-action meta)]
+            (println separator)
+            (println (format "  [%d/%d]  %s  (%s)  —  %s"
+                             (inc i) action-count (:rel meta) (:branch meta) (commit-reason meta)))
+            (println (format "  Action: %s" (command-label action)))
+            (when-let [upstream (:upstream meta)]
+              (println (format "  Upstream: %s" upstream)))
+            (println)
+            (cond
+              (= :skip-diverged action)
+              (do
+                (swap! skipped-count inc)
+                (println "  Skipped — repository has both local and remote commits; resolve divergence manually."))
+
+              dry-run?
+              (print-command-preview! action)
+
+              :else
+              (let [exit (try
+                           (run-commit-action! action (:repo meta))
+                           (catch Exception e
+                             (binding [*out* *err*]
+                               (println (str "Failed to run " (command-label action) ": " (.getMessage e))))
+                             1))]
+                (when-not (zero? exit)
+                  (System/exit exit))
+                (println)
+                (println (format "  Done — exit code: %d" exit))))))
         (println separator)
-        (println (format "  Finished. Processed %d dirty repo(s)." dirty-count))))))
+        (println (format "  Finished. Processed %d repo(s). Skipped %d diverged repo(s)."
+                         (- action-count @skipped-count)
+                         @skipped-count))
+        (when (pos? @skipped-count)
+          (System/exit 1))))))
 
 (defn setup-root [root]
   (.getAbsolutePath (io/file root)))
