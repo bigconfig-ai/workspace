@@ -233,20 +233,31 @@ Examples:
       (str/trim-newline out)
       "UNKNOWN")))
 
-(defn git-upstream [repo]
+(defn configured-git-upstream [repo]
   (let [{:keys [exit out]} (sh-in repo "git" "rev-parse" "--abbrev-ref" "--symbolic-full-name" "@{upstream}")]
     (when (zero? exit)
       (let [upstream (str/trim-newline out)]
         (when-not (empty? upstream)
           upstream)))))
 
+(defn git-ref-exists? [repo ref]
+  (zero? (:exit (sh-in repo "git" "show-ref" "--verify" "--quiet" ref))))
+
+(defn git-upstream [repo branch]
+  (or (configured-git-upstream repo)
+      (let [origin-branch (str "origin/" branch)]
+        (when (and (not (empty? branch))
+                   (not= "HEAD" branch)
+                   (git-ref-exists? repo (str "refs/remotes/" origin-branch)))
+          origin-branch))))
+
 (defn parse-count [s]
   (if (empty? (or s ""))
     0
     (Long/parseLong s)))
 
-(defn git-divergence [repo]
-  (let [{:keys [exit out]} (sh-in repo "git" "rev-list" "--left-right" "--count" "@{upstream}...HEAD")]
+(defn git-divergence [repo upstream]
+  (let [{:keys [exit out]} (sh-in repo "git" "rev-list" "--left-right" "--count" (str upstream "...HEAD"))]
     (if (zero? exit)
       (let [[behind ahead] (str/split (str/trim out) #"\s+")]
         {:ahead-count (parse-count ahead)
@@ -267,9 +278,9 @@ Examples:
                        []
                        (git-lines repo "status" "--porcelain"))
         dirty-count (count status-lines)
-        upstream (git-upstream repo)
+        upstream (git-upstream repo branch)
         {:keys [ahead-count behind-count]} (if upstream
-                                             (git-divergence repo)
+                                             (git-divergence repo upstream)
                                              {:ahead-count 0
                                               :behind-count 0})
         no-tracked? (zero? tracked-count)
